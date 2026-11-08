@@ -1,56 +1,66 @@
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
+// You will need to add this package to your package.json
+const { MusicKit } = require('musicstream-sdk'); 
 
 const app = express();
-app.use(cors()); // Allow your app to access this backend
+app.use(cors());
+
+// Initialize the SDK (No API key needed according to docs)
+const mk = new MusicKit({
+    language: 'ta', // Default to Tamil for your South Indian focus
+    location: 'IN',
+    sourceOrder: 'best'
+});
 
 app.get('/api/search', async (req, res) => {
     const query = req.query.q;
-    const language = req.query.lang || 'tamil,telugu,hindi'; // Default to South Indian
     if (!query) return res.status(400).json({ error: 'Query is required' });
 
     try {
-        // Using a known unofficial JioSaavn endpoint structure
-        // We append language to the query to filter results
-        const searchUrl = `https://jiosaavn-api-private-production-6a4b.up.railway.app/search/songs?query=${encodeURIComponent(query)}&limit=30`;
+        // 1. Search YouTube Music via the SDK
+        const searchResults = await mk.search(query);
         
-        const response = await axios.get(searchUrl);
-        const data = response.data;
+        // The SDK returns different types, we just want songs
+        const songs = searchResults.items.filter(item => item.type === 'song');
 
-        // Handle different response structures from the API
-        let rawTracks = data.data?.results || data.data?.songs || data.results || [];
-        
-        if (!rawTracks || rawTracks.length === 0) {
+        if (songs.length === 0) {
             return res.json({ tracks: [] });
         }
 
-        // Map the data to a clean format for your app
-        const tracks = rawTracks.map(t => {
-            const bestImage = t.image ? t.image[t.image.length - 1].url : 'https://picsum.photos/seed/' + t.id + '/500/500';
-            const bestAudio = t.downloadUrl ? t.downloadUrl[t.downloadUrl.length - 1].url : t.url;
-            return {
-                id: t.id,
-                title: t.name || t.title,
-                artist: t.artists?.primary?.[0]?.name || t.subtitle || 'Various Artists',
-                album: t.album?.name || 'Single',
-                duration: t.duration || 0,
-                audioUrl: bestAudio, // This is the full-length stream
-                image: bestImage
-            };
-        }).filter(t => t.audioUrl);
+        // 2. Fetch the stream URL for the top result
+        // Note: Streaming from YouTube requires yt-dlp on the server. 
+        // Vercel might block this due to system dependencies. 
+        // We will try to get the stream URL anyway.
+        const topSong = songs[0];
+        let streamUrl = '';
+        
+        try {
+            const streamData = await mk.getStream(topSong.id, 'high');
+            streamUrl = streamData.url;
+        } catch (streamErr) {
+            console.error('Could not get stream URL (yt-dlp missing?):', streamErr.message);
+            // If stream fails, we still return metadata so you can see it works
+        }
+
+        // Format the response for your app
+        const tracks = songs.map(song => ({
+            id: song.id,
+            title: song.title,
+            artist: song.artist?.name || 'YouTube Music',
+            album: song.album?.name || 'Single',
+            duration: song.duration || 0,
+            // If streamUrl is empty, the app will fail to play, but search will work
+            audioUrl: song.id === topSong.id ? streamUrl : '', 
+            image: song.thumbnail?.url || 'https://picsum.photos/seed/' + song.id + '/500/500'
+        }));
 
         res.json({ tracks });
 
     } catch (error) {
         console.error('Backend fetch error:', error.message);
-        res.status(500).json({ error: 'Failed to fetch music' });
+        res.status(500).json({ error: 'Failed to fetch YouTube Music data' });
     }
 });
-
-// For local testing
-if (require.main === module) {
-    app.listen(3000, () => console.log('Backend running on http://localhost:3000'));
-}
 
 module.exports = app;
